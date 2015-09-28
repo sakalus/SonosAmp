@@ -1,0 +1,325 @@
+// Design by Waldemar Sakalus - SAKA
+// ver 09262015
+// App to monitor Sonos status, integrated with WeMo switch thorugh IFTTT
+
+TCPClient client;
+byte server[] = { 192, 168, 0, xxx }; //put your Sonos_IP_address
+unsigned long smartDelay = millis();
+unsigned long smartCheck = millis();
+const unsigned long smartDelayTime = 2000; //2s probing time, how often Sonos is checked whether playing/ stopped
+const unsigned long smartBreakTime = 10000; //wait 10s after activating IFTTT event to switch amp on or off
+const unsigned long smartCheckTime = 3000000; //redundancy check, every 5min if playback stopped send amp off IFTTT command
+int builtInLED = 7;
+String sonosTransportState = "";
+String previousState;
+int counter = 0;
+byte ledStatus = LOW;
+int eventCounter = 0;
+
+int sonosAmp(String command);
+
+
+
+void setup()
+{
+    pinMode(builtInLED, OUTPUT);
+    Serial.begin(115200);    
+    Serial.println("connecting...");
+    Particle.function("Sonos", sonosAmp);
+}
+
+void loop()
+{
+    if (millis() > smartDelay) {
+        getSonosStatus();
+        actionOnStatus(readResponse());
+        // and wait at least 1 second before doing it again
+        smartDelay += smartDelayTime;
+        sendHeartbeat();
+        
+        //DEBUGGING COMMANDS BELOW
+        //Serial.println(sonosResponse);
+        //Serial.print(counter);
+        Serial.println(sonosTransportState);
+        counter ++;
+    }
+    
+    if (millis() > smartCheck) {
+        getSonosStatus();
+        redundancyCheck(readResponse());
+        smartCheck += smartCheckTime;
+    }
+}
+
+int sonosAmp(String command)
+{
+    String sonosResponse;
+    if(command == "ON")
+    {
+        Serial.println(command);
+        playSonos();
+        sonosResponse = readResponse();
+        Serial.print(tryExtractString(sonosResponse,"HTTP/1.1 ","CONTENT-LENGTH:"));
+    }
+    else if(command == "OFF")
+    {
+        Serial.println(command);
+        //stopSonos();
+    }
+
+    if (sonosResponse != NULL) return 1;
+    else return -1;
+}
+
+void sendHeartbeat() {
+    //send a short heartbeat, so visible through the built in LED that the device is not hanging
+    byte tempLED = LOW;
+    for (int i = 0; i < 5; i++) {
+        digitalWrite(builtInLED, tempLED); // Write LED high/low
+        tempLED = (tempLED == HIGH) ? LOW : HIGH;
+        delay(30);
+    }
+    digitalWrite(builtInLED, ledStatus); //restore the LED status
+}
+
+String readResponse() {
+    unsigned long lastdata = millis();
+    String sonosResponse = "";
+    while (client.connected()  || (millis()-lastdata < 500)) { //500ms timeout
+        if (client.available()) {
+            char c = client.read();
+            sonosResponse += c;
+            lastdata = millis();
+        }
+    }
+    client.stop();
+    return sonosResponse;
+}
+
+void actionOnStatus(String sonosResponse) {
+        sonosTransportState = tryExtractString(sonosResponse,"<CurrentTransportState>","</CurrentTransportState>");
+        if (previousState != sonosTransportState) {
+            //PLAYING, PAUSED_PLAYBACK, STOPPED, TRANSITIONING
+            if (sonosTransportState == "PLAYING") {
+                digitalWrite (builtInLED , HIGH );
+                Spark.publish("Amp_state", "ON", 60, PRIVATE);
+                ledStatus = HIGH;
+            }
+            else if (sonosTransportState == "TRANSITIONING") ;
+            else if (sonosTransportState == "PAUSED_PLAYBACK" || sonosTransportState == "STOPPED") {
+                digitalWrite (builtInLED , LOW );
+                Spark.publish("Amp_state", "OFF", 60, PRIVATE);
+                ledStatus = LOW;
+            }
+            else {
+                digitalWrite( builtInLED , LOW );
+                Spark.publish("Amp_state", "OFF", 60, PRIVATE);
+                ledStatus = LOW;
+            }
+            previousState = sonosTransportState;
+            smartDelay  += smartBreakTime;
+        }
+}
+
+void redundancyCheck(String sonosResponse) {
+    sonosTransportState = tryExtractString(sonosResponse,"<CurrentTransportState>","</CurrentTransportState>");
+    if (sonosTransportState == "PAUSED_PLAYBACK" || sonosTransportState == "STOPPED") {
+        digitalWrite (builtInLED , LOW );
+        Spark.publish("Amp_state", "OFF", 60, PRIVATE);
+        ledStatus = LOW;
+    }
+}
+
+void getSonosStatus()
+/*
+POST http://Sonos_IP_address:1400/MediaRenderer/AVTransport/Control HTTP/1.1
+HOST: Sonos_IP_address:1400
+SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"
+CONTENT-TYPE: text/xml; charset="utf-8"
+Content-Length: 354
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      </u:GetTransportInfo>
+   </s:Body>
+</s:Envelope>
+*/
+{
+    if (client.connect(server, 1400))
+    {
+        String contentSOAP ="<?xml version=\"1.0\" encoding=\"utf-8\"?>";
+        contentSOAP += "<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+        contentSOAP += "<s:Body>";
+        contentSOAP += "<u:GetTransportInfo xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">";
+        contentSOAP += "<InstanceID>0</InstanceID>";
+        contentSOAP += "</u:GetTransportInfo>";
+        contentSOAP += "</s:Body>";
+        contentSOAP += "</s:Envelope>";
+        
+        String post = "POST http://";
+        post += serverText();
+        post += ":1400/MediaRenderer/AVTransport/Control HTTP/1.1\r\n";
+        post += "HOST: ";
+        post += serverText();
+        post += ":1400\r\n";
+        post += "SOAPACTION: \"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"\r\n";
+        post += "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        client.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+
+void playSonos()
+/*
+POST http://Sonos_IP_address:1400/MediaRenderer/AVTransport/Control HTTP/1.1
+HOST: Sonos_IP_address:1400
+SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#Play"
+CONTENT-TYPE: text/xml; charset="utf-8"
+Content-Length: 354
+
+
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+      </u:Play>
+   </s:Body>
+</s:Envelope>
+*/
+{
+    if (client.connect(server, 1400))
+    {
+        String contentSOAP ="<?xml version=\"1.0\" encoding=\"utf-8\"?>";
+        contentSOAP += "<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+        contentSOAP += "<s:Body>";
+        contentSOAP += "<u:Play xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">";
+        contentSOAP += "<InstanceID>0</InstanceID>";
+        contentSOAP += "<Speed>1</Speed>";
+        contentSOAP += "</u:Play>";
+        contentSOAP += "</s:Body>";
+        contentSOAP += "</s:Envelope>";
+        
+        String post = "POST http://";
+        post += serverText();
+        post += ":1400/MediaRenderer/AVTransport/Control HTTP/1.1\r\n";
+        post += "HOST: ";
+        post += serverText();
+        post += ":1400\r\n";
+        post += "SOAPACTION: \"urn:schemas-upnp-org:service:AVTransport:1#Play\"\r\n";
+        post += "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        client.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+
+void stopSonos()
+/*
+POST http://Sonos_IP_address:1400/MediaRenderer/AVTransport/Control HTTP/1.1
+HOST: Sonos_IP_address:1400
+SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#Stop"
+CONTENT-TYPE: text/xml; charset="utf-8"
+Content-Length: 354
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+      </u:Stop>
+   </s:Body>
+</s:Envelope>
+*/
+{
+{
+    if (client.connect(server, 1400))
+    {
+        String contentSOAP ="<?xml version=\"1.0\" encoding=\"utf-8\"?>";
+        contentSOAP += "<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+        contentSOAP += "<s:Body>";
+        contentSOAP += "<u:Stop xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">";
+        contentSOAP += "<InstanceID>0</InstanceID>";
+        contentSOAP += "<Speed>1</Speed>";
+        contentSOAP += "</u:Stop>";
+        contentSOAP += "</s:Body>";
+        contentSOAP += "</s:Envelope>";
+        
+        String post = "POST http://";
+        post += serverText();
+        post += ":1400/MediaRenderer/AVTransport/Control HTTP/1.1\r\n";
+        post += "HOST: ";
+        post += serverText();
+        post += ":1400\r\n";
+        post += "SOAPACTION: \"urn:schemas-upnp-org:service:AVTransport:1#Stop\"\r\n";
+        post += "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        client.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+}
+
+String serverText(){
+    String addressIP = "";
+    for (int i = 0; i < 4; i++) {
+        addressIP += server[i];
+        if (i < 3) {
+            addressIP += ".";
+        }
+    }
+    return addressIP;
+}
+
+// Returns any text found between a start and end string inside 'str'
+// example: startfooend  -> returns foo
+// credit to an example on particle.io
+String tryExtractString(String str, const char* start, const char* end) {
+    if (str == NULL) {
+        return NULL;
+    }
+
+    int idx = str.indexOf(start);
+    if (idx < 0) {
+        return NULL;
+    }
+
+    int endIdx = str.indexOf(end);
+    if (endIdx < 0) {
+        return NULL;
+    }
+
+    return str.substring(idx + strlen(start), endIdx);
+}
