@@ -1,0 +1,432 @@
+// Design by Waldemar Sakalus - SAKA
+// ver 10082015
+// App to monitor Sonos status, integrated with WeMo switch and IFTTT
+
+
+TCPClient sonos;
+TCPClient wemo;
+byte sonosIP[] = { 192, 168, 0, xxx }; //put your Sonos_IP_address
+byte wemoIP[] = { 192, 168, 0, yyy }; //put your WeMO Switch IP address
+String sonosResponse;
+String wemoResponse;
+
+unsigned long smartDelay = millis();
+unsigned long smartCheck = millis();
+const unsigned long smartDelayTime = 2000; //2s probing time, how often Sonos is checked whether playing/ stopped
+int builtInLED = 7;
+String sonosTransportState = "";
+String previousState;
+byte ledStatus = LOW;
+byte playSonosCheck = LOW;
+byte stopSonosCheck = LOW;
+
+int sonosAmp(String command);
+
+
+void setup()
+{
+    pinMode(builtInLED, OUTPUT);
+    Serial.begin(115200);
+    Serial.println("Connected");
+    Particle.function("Sonos", sonosAmp);
+}
+
+void loop() {
+    getSonosStatus();
+    sonosTransportState = tryExtractString(readSonosResponse(),"<CurrentTransportState>","</CurrentTransportState>");
+    if (previousState != sonosTransportState) {
+        Serial.println(sonosTransportState);
+        if (sonosTransportState == "PLAYING") {
+            digitalWrite (builtInLED , HIGH );
+            startWeMo();
+            ledStatus = HIGH;
+        }
+        else if (sonosTransportState == "PAUSED_PLAYBACK" || sonosTransportState == "STOPPED") {
+            digitalWrite (builtInLED , LOW );
+            stopWeMo();
+            ledStatus = LOW;
+        }
+        previousState = sonosTransportState;
+    }
+    sendHeartbeat();
+    if (playSonosCheck == HIGH) {
+        playSonos();
+        //sonosResponse = readSonosResponse();
+        //Serial.println(tryExtractString(sonosResponse,"HTTP/1.1 ","CONTENT-LENGTH:"));
+        //Serial.println("playSonosCheck");
+        playSonosCheck = LOW;
+    }
+    if (stopSonosCheck == HIGH) {
+        stopSonos();
+        //sonosResponse = readSonosResponse();
+        //Serial.print(tryExtractString(sonosResponse,"HTTP/1.1 ","CONTENT-LENGTH:"));
+        //Serial.println("stopSonosCheck");
+        stopSonosCheck = LOW;
+    }
+    delay(smartDelayTime);
+     
+}
+
+int sonosAmp(String command)
+{
+    String sonosResponse;
+    if(command == "ON")
+    {
+        Serial.println("ON received");
+        playSonosCheck = HIGH;
+        //playSonos();
+        //sonosResponse = readSonosResponse();
+        //Serial.print(tryExtractString(sonosResponse,"HTTP/1.1 ","CONTENT-LENGTH:"));
+    }
+    else if(command == "OFF")
+    {
+        //Serial.println(command);
+        Serial.println("OFF received");
+        stopSonosCheck = HIGH;
+        //stopSonos();
+        //sonosResponse = readSonosResponse();
+        //Serial.print(tryExtractString(sonosResponse,"HTTP/1.1 ","CONTENT-LENGTH:"));
+    }
+
+    if (sonosResponse != NULL) return 1;
+    else return -1;
+}
+
+
+String readSonosResponse() {
+    unsigned long lastdata = millis();
+    String sonosResponse = "";
+    while (sonos.connected()  || (millis()-lastdata < 500)) { //500ms timeout
+        if (sonos.available()) {
+            char c = sonos.read();
+            sonosResponse += c;
+            lastdata = millis();
+        }
+    }
+    sonos.stop();
+    return sonosResponse;
+}
+
+String readWeMoResponse() {
+    unsigned long lastdata = millis();
+    String wemoResponse = "";
+    while (wemo.connected()  || (millis()-lastdata < 500)) { //500ms timeout
+        if (wemo.available()) {
+            char c = wemo.read();
+            wemoResponse += c;
+            lastdata = millis();
+        }
+    }
+    wemo.stop();
+    return wemoResponse;
+}
+
+void getSonosStatus()
+/*
+POST http://Sonos_IP_address:1400/MediaRenderer/AVTransport/Control HTTP/1.1
+HOST: Sonos_IP_address:1400
+SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"
+CONTENT-TYPE: text/xml; charset="utf-8"
+Content-Length: 354
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      </u:GetTransportInfo>
+   </s:Body>
+</s:Envelope>
+*/
+{
+    if (sonos.connect(sonosIP, 1400))
+    {
+        String contentSOAP ="<?xml version=\"1.0\" encoding=\"utf-8\"?>";
+        contentSOAP += "<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+        contentSOAP += "<s:Body>";
+        contentSOAP += "<u:GetTransportInfo xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">";
+        contentSOAP += "<InstanceID>0</InstanceID>";
+        contentSOAP += "</u:GetTransportInfo>";
+        contentSOAP += "</s:Body>";
+        contentSOAP += "</s:Envelope>";
+        
+        String post = "POST http://";
+        post += sonosText();
+        post += ":1400/MediaRenderer/AVTransport/Control HTTP/1.1\r\n";
+        post += "HOST: ";
+        post += sonosText();
+        post += ":1400\r\n";
+        post += "SOAPACTION: \"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"\r\n";
+        post += "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        sonos.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+
+
+void playSonos()
+/*
+POST http://Sonos_IP_address:1400/MediaRenderer/AVTransport/Control HTTP/1.1
+HOST: Sonos_IP_address:1400
+SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#Play"
+CONTENT-TYPE: text/xml; charset="utf-8"
+Content-Length: 354
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+      </u:Play>
+   </s:Body>
+</s:Envelope>
+
+<?xml version="1.0" encoding="utf-8"?><s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID><Speed>1</Speed></u:Play></s:Body></s:Envelope>
+*/
+{
+    if (sonos.connect(sonosIP, 1400))
+    {
+        String contentSOAP ="<?xml version=\"1.0\" encoding=\"utf-8\"?>";
+        contentSOAP += "<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+        contentSOAP += "<s:Body>";
+        contentSOAP += "<u:Play xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">";
+        contentSOAP += "<InstanceID>0</InstanceID>";
+        contentSOAP += "<Speed>1</Speed>";
+        contentSOAP += "</u:Play>";
+        contentSOAP += "</s:Body>";
+        contentSOAP += "</s:Envelope>";
+        
+        String post = "POST http://";
+        post += sonosText();
+        post += ":1400/MediaRenderer/AVTransport/Control HTTP/1.1\r\n";
+        post += "HOST: ";
+        post += sonosText();
+        post += ":1400\r\n";
+        post += "SOAPACTION: \"urn:schemas-upnp-org:service:AVTransport:1#Play\"\r\n";
+        post += "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        sonos.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+
+void stopSonos()
+/*
+POST http://Sonos_IP_address:1400/MediaRenderer/AVTransport/Control HTTP/1.1
+HOST: Sonos_IP_address:1400
+SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#Stop"
+CONTENT-TYPE: text/xml; charset="utf-8"
+Content-Length: 354
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+      </u:Stop>
+   </s:Body>
+</s:Envelope>
+*/
+{
+    if (sonos.connect(sonosIP, 1400))
+    {
+        String contentSOAP ="<?xml version=\"1.0\" encoding=\"utf-8\"?>";
+        contentSOAP += "<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+        contentSOAP += "<s:Body>";
+        contentSOAP += "<u:Stop xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">";
+        contentSOAP += "<InstanceID>0</InstanceID>";
+        contentSOAP += "<Speed>1</Speed>";
+        contentSOAP += "</u:Stop>";
+        contentSOAP += "</s:Body>";
+        contentSOAP += "</s:Envelope>";
+        
+        String post = "POST http://";
+        post += sonosText();
+        post += ":1400/MediaRenderer/AVTransport/Control HTTP/1.1\r\n";
+        post += "HOST: ";
+        post += sonosText();
+        post += ":1400\r\n";
+        post += "SOAPACTION: \"urn:schemas-upnp-org:service:AVTransport:1#Stop\"\r\n";
+        post += "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        sonos.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+
+void startWeMo()
+/*
+POST http://WeMo_IP_address:49154/upnp/control/basicevent1 HTTP/1.1
+Content-Type: text/xml; charset=utf-8
+SOAPACTION: "urn:Belkin:service:basicevent:1#SetBinaryState"
+Connection: keep-alive
+Content-Length: 299
+Host: 192.168.0.120:49154
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+      </u:Stop>
+   </s:Body>
+</s:Envelope>
+*/
+{
+    if (wemo.connect(wemoIP, 49154))
+    {
+        String contentSOAP = "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:SetBinaryState xmlns:u=\"urn:Belkin:service:basicevent:1\"><BinaryState>1</BinaryState></u:SetBinaryState></s:Body></s:Envelope>";
+
+        String post = "POST http://";
+        post += wemoText();
+        post += ":49154/upnp/control/basicevent1 HTTP/1.1\r\n";
+        post += "Content-Type: text/xml; charset=utf-8\r\n";
+        post += "SOAPACTION: \"urn:Belkin:service:basicevent:1#SetBinaryState\"\r\n";
+        post += "Connection: keep-alive\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\nHost: ";
+        post += wemoText();
+        post += ":49154";
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        wemo.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+
+void stopWeMo()
+/*
+POST http://WeMo_IP_address:49154/upnp/control/basicevent1 HTTP/1.1
+Content-Type: text/xml; charset=utf-8
+SOAPACTION: "urn:Belkin:service:basicevent:1#SetBinaryState"
+Connection: keep-alive
+Content-Length: 299
+Host: 192.168.0.120:49154
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+   <s:Body>
+      <u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+      </u:Stop>
+   </s:Body>
+</s:Envelope>
+*/
+{
+    if (wemo.connect(wemoIP, 49154))
+    {
+        String contentSOAP = "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:SetBinaryState xmlns:u=\"urn:Belkin:service:basicevent:1\"><BinaryState>0</BinaryState></u:SetBinaryState></s:Body></s:Envelope>";
+
+        String post = "POST http://";
+        post += wemoText();
+        post += ":49154/upnp/control/basicevent1 HTTP/1.1\r\n";
+        post += "Content-Type: text/xml; charset=utf-8\r\n";
+        post += "SOAPACTION: \"urn:Belkin:service:basicevent:1#SetBinaryState\"\r\n";
+        post += "Connection: keep-alive\r\n";
+        post += "Content-Length: ";
+        post += contentSOAP.length();
+        post += "\r\nHost: ";
+        post += wemoText();
+        post += ":49154";
+        post += "\r\n\r\n";
+        post += contentSOAP;
+        post += "\r\n\r\n";
+
+        //Serial.println(post);
+        wemo.print(post);
+
+        delay(10);
+    }
+    else Serial.println("connection failed");
+}
+
+String sonosText(){
+    String addressIP = "";
+    for (int i = 0; i < 4; i++) {
+        addressIP += sonosIP[i];
+        if (i < 3) {
+            addressIP += ".";
+        }
+    }
+    return addressIP;
+}
+
+String wemoText(){
+    String addressIP = "";
+    for (int i = 0; i < 4; i++) {
+        addressIP += wemoIP[i];
+        if (i < 3) {
+            addressIP += ".";
+        }
+    }
+    return addressIP;
+}
+
+void sendHeartbeat() {
+    //send a short heartbeat, so visible through the built in LED that the device is not hanging
+    byte tempLED = LOW;
+    for (int i = 0; i < 5; i++) {
+        digitalWrite(builtInLED, tempLED); // Write LED high/low
+        tempLED = (tempLED == HIGH) ? LOW : HIGH;
+        delay(30);
+    }
+    digitalWrite(builtInLED, ledStatus); //restore the LED status
+}
+
+// Returns any text found between a start and end string inside 'str'
+// example: startfooend  -> returns foo
+// credit to an example on particle.io
+String tryExtractString(String str, const char* start, const char* end) {
+    if (str == NULL) {
+        return NULL;
+    }
+
+    int idx = str.indexOf(start);
+    if (idx < 0) {
+        return NULL;
+    }
+
+    int endIdx = str.indexOf(end);
+    if (endIdx < 0) {
+        return NULL;
+    }
+
+    return str.substring(idx + strlen(start), endIdx);
+}
